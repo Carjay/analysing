@@ -51,6 +51,7 @@ class ASMFile:
         self._romatchers = (
             # matcher, what parsing function to run
             ( re.compile('.+R_X86_64_32S\s+(\..+)\s+'), self._rorelocparse ), # only accept symbols starting with '.' which should be ELF sections
+            ( re.compile('\s*([0-9a-fA-F]+):\s+((?:[0-9a-fA-F ]{2})+).+BYTE PTR \[rip\+(0x[0-9a-fA-F]+)\].+'), self._loadipparse ), # will contain mov, so needs to come first
             ( re.compile('.+\smov\s+.+,(0x[0-9a-fA-F]+)\s+'), self._loadaddrparse ),
         )
 
@@ -83,6 +84,14 @@ class ASMFile:
         parseddata = []
         addr, = m.groups()
         addr = int(addr, 16)
+        self.loadaddrlines.append( ( addr, idx ) )
+
+
+    def _loadipparse(self, idx, m):
+        parseddata = []
+        ipaddr, opcodes, offsetaddr, = m.groups()
+        opcodelen = len(opcodes.strip().split(' '))
+        addr = int(ipaddr, 16) + int(offsetaddr, 16) + opcodelen
         self.loadaddrlines.append( ( addr, idx ) )
 
 
