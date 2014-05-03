@@ -194,70 +194,73 @@ def main():
                 except zlib.error, exc:
                     # now it gets more complicated...
                     sys.stdout.write(", nok!\n")
-                    result = trypermuteddecompress(pagebuf, occurencelist)
-                    if result is not None:
-                        # fix up the source buffer, we always make a copy
-                        # this is slow so for huge files we'd need to use subbuffers
-                        print len(buf)
-                        buf = buf[0:addr] + result + buf[addr+pd_size:]
-                        print len(buf)
+                    worked = False
+
+                    # check if we should skip to trying to backtrack
+                    if previousuncompaddr == 0 or previousuncompocc == 0:
+                        result = trypermuteddecompress(pagebuf, occurencelist)
+                        if result is not None:
+                            # fix up the source buffer, we always make a copy
+                            # this is slow so for huge files we'd need to use subbuffers
+                            buf = buf[0:addr] + result + buf[addr+pd_size:]
+                            worked = True
                     else:
-                         # check if we must patch a previous section
-                        if previousuncompaddr != 0 and previousuncompocc > 0:
-                            print("uncompressed previous section at %d, trying to patch up" % previousuncompaddr)
-                            worked = False
-                            backtrack = 1
-                            startbacktrack = 1
+                        print("uncompressed previous section at %d, trying to patch up" % previousuncompaddr)
+                        backtrack = 0
+                        startbacktrack = 0
 
-                            # short cut: try to find the zlib header
-                            for backtrack in range(1,previousuncompocc+1):
-                                # backtrack...
-                                if buf[addr-backtrack:addr-backtrack+2] == 'x\x01':
-                                    startbacktrack = backtrack
-                                    print("found zlib header at backtrack %d" % startbacktrack)
-                                    break
-                           
-                            for backtrack in range(startbacktrack,previousuncompocc+1):
-                                # backtrack...
-                                pagebuf = buf[addr-backtrack:addr-backtrack+pd_size]
-
-                                # so ... here we go again
-                                try:
-                                    uncomppage = zlib.decompress(pagebuf)
+                        # short cut: try to find the zlib header
+                        for backtrack in range(0,previousuncompocc+1):
+                            # backtrack...
+                            if buf[addr-backtrack:addr-backtrack+2] == 'x\x01':
+                                startbacktrack = backtrack
+                                print("found zlib header at backtrack %d" % startbacktrack)
+                                break
+                  
+                        # a backtrack of 0 is allowed to cover the case where we follow an uncompressed section
+                        # but it did not have any \x0d missing
+                        for backtrack in range(startbacktrack,previousuncompocc+1):
+                            pagebuf = buf[addr-backtrack:addr-backtrack+pd_size]
+     
+                            # try to decompress
+                            try:
+                                uncomppage = zlib.decompress(pagebuf)
+                                worked = True
+                                break
+                            except zlib.error, exc:
+                                # now it gets more complicated...
+                                # we check various permutations
+    
+                                occurencelist = [] # need to reevaluate
+                                for idx in range(len(pagebuf)):
+                                    if pagebuf[idx] == '\x0a':
+                                        occurencelist.append(idx)
+    
+                                result = trypermuteddecompress(pagebuf, occurencelist)
+                                if result is not None:
+                                    # fix up the missing characters
+                                    buf = buf[:addr-backtrack] + result + buf[addr-backtrack+pd_size:]
                                     worked = True
                                     break
-                                except zlib.error, exc:
-                                    # now it gets more complicated...
+    
+                        # finally fix the difference accumulated by the previous sections by
+                        # inserting 'X' as patching any \x0a would be just guesswork (we do not know if it
+                        # it even all happened in the previous section as there may be streams of uncompressed
+                        # sections which will accumulate missing the \x0d characters)
+                        if worked and backtrack > 0:
+                            print("worked after backtracking %d bytes" % backtrack)
+                            buf = buf[0:previousuncompaddr] + (backtrack * 'X') + buf[previousuncompaddr:]
 
-                                    occurencelist = [] # need to reevaluate
-                                    for idx in range(len(pagebuf)):
-                                        if pagebuf[idx] == '\x0a':
-                                            occurencelist.append(idx)
+                    if worked:
+                        previousuncompaddr = 0 # reset
+                        previousuncompocc  = 0
+                        continue
+            
+                    print("no luck... save what we have and quit")
+                    with open(vmcore + '_partialfixed', 'wb+') as fw:
+                        fw.write(buf)
+                    return
 
-                                    result = trypermuteddecompress(pagebuf, occurencelist)
-                                    if result is not None:
-                                        # fix up the missing characters
-                                        buf = buf[:addr-backtrack] + result + buf[addr-backtrack+pd_size:]
-                                        worked = True
-                                        break
-
-                            # finally fix the difference accumulated by the previous sections by
-                            # inserting 'X' as patching any \x0a would be just guesswork (we do not know if it
-                            # it even all happened in the previous section as there may be streams of uncompressed
-                            # sections which will accumulate missing the \x0d characters)
-                            if worked and backtrack > 0:
-                                print("worked after backtracking %d bytes" % backtrack)
-                                buf = buf[0:previousuncompaddr] + (backtrack * 'X') + buf[previousuncompaddr:]
-
-                            if worked:
-                                previousuncompaddr = 0 # reset
-                                previousuncompocc  = 0
-                                continue
-                        
-                        print("no luck... save what we have and quit")
-                        with open(vmcore + '_partialfixed', 'wb+') as fw:
-                            fw.write(buf)
-                        return
                 previousuncompaddr = 0 # reset
                 previousuncompocc  = 0
             else:
