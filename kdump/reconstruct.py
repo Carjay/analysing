@@ -139,10 +139,54 @@ def main():
         patched_sections = [] # we need to manually inspect these sites
         
         pagedescfmt = "lIIL" # offset, size, flags, page_flags
+        pagedescfmtsize = struct.calcsize(pagedescfmt)
+
+        # the reconstruct code makes a lot of assumptions and is not really meant
+        # to "always just work"
+        # in case of doubt, use a hex editor and check manually
+
         readoffset = dataoffset
         while readoffset < (len(buf)-dataoffset):
-            pagedescfmtsize = struct.calcsize(pagedescfmt)
-            pd_offset, pd_size, pd_flags, pd_page_flags = struct.unpack(pagedescfmt, buf[readoffset:readoffset+pagedescfmtsize])
+            pdbuf = buf[readoffset:readoffset+pagedescfmtsize]
+            cnt = pdbuf.count('\x0a')
+            if cnt > 0:
+                found = 0
+                if cnt > 2:
+                    print("buffer has %d 0a" % cnt)
+                    print [pdbuf]
+
+                    pd_offset, pd_size, pd_flags, pd_page_flags = struct.unpack(pagedescfmt, pdbuf)
+                    print("%x %d %x %x" % (pd_offset, pd_size, pd_flags, pd_page_flags))
+                    # we cannot currently deal with this
+                    return
+
+                pdbuflist = []
+                for idx in range(pagedescfmtsize):
+                    if pdbuf[idx] == '\x0a':
+                        pdbuflist.append(idx)
+                pd_offset, pd_size, pd_flags, pd_page_flags = struct.unpack(pagedescfmt, pdbuf)
+                
+                # if offset looks strange then replace the 0a here
+                if (pdbuf[0:struct.calcsize("l")].count('\x0a') and pd_offset <= readoffset + (pagedescfmtsize * 2)) or (pd_offset > len(buf)):
+                    #print("strange offset %d" % pd_offset)
+                    pdbuf = pdbuf[0:struct.calcsize("l")-1].replace('\x0a', '\x0d\x0a') + pdbuf[struct.calcsize("l")-1:-1]
+                    pd_offset, pd_size, pd_flags, pd_page_flags = struct.unpack(pagedescfmt, pdbuf)
+                    found += 1
+                    
+                # page_flags are always set to 0 in the RHEL6 code... hmm
+                # and pd_flags bit indicates page is compressed by ZLIB, RHEL6 does not support anything else
+                if (pdbuf[struct.calcsize("l"):].count('\x0a') and (pd_page_flags != 0) or (pd_flags & ~1)):
+                    #print("strange flags %d" % pd_offset)
+                    pdbuf = pdbuf[0:struct.calcsize("l")] + pdbuf[struct.calcsize("l"):].replace('\x0a', '\x0d\x0a')
+                    pdbuf = pdbuf[:-1]
+                    pd_offset, pd_size, pd_flags, pd_page_flags = struct.unpack(pagedescfmt, pdbuf)
+                    found += 1
+                
+                if found > 0:
+                    buf = buf[0:readoffset] + pdbuf + buf[readoffset+pagedescfmtsize-found:]
+           
+            pd_offset, pd_size, pd_flags, pd_page_flags = struct.unpack(pagedescfmt, pdbuf)
+            #print("%x %d %x %x" % (pd_offset, pd_size, pd_flags, pd_page_flags))
             if (pd_offset == 0): # TODO: parse Bitmap to collect all valid pages
                 break
             if pd_offset in offsetlist:
@@ -160,6 +204,12 @@ def main():
                 offsetlist[pd_offset] = (pd_size, pd_flags, pd_page_flags)
             readoffset += struct.calcsize(pagedescfmt)
             totalcount += 1
+
+            print("scanfixing %x (%s) %d %x %x" % (pd_offset, getHR(pd_offset), pd_size, pd_flags, pd_page_flags))
+
+        print("scanned index, writing fixed version as backup")
+        with open(vmcore + '_fixedindex', 'wb+') as fw:
+            fw.write(buf)
         
         # some entries appear more than once
         addresses = sorted(offsetlist.keys())
