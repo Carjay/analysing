@@ -39,23 +39,25 @@ def trypermuteddecompress(pagebuf, occurencelist):
                 idx = occurencelist[permidx]
                 tmpbuf += pagebuf[last:idx] + '\x0d'
                 last = idx
-            tmpbuf += pagebuf[last:]
+            tmpbuf += pagebuf[last:-len(idxlist)]
 
             try:
                 uncomppage = zlib.decompress(tmpbuf)
-                print("replacing indices %s worked (%d bytes)" % (idxlist, len(uncomppage)))
-                return tmpbuf
+                print("replacing indices %s worked (%d bytes)" % (','.join(["%d" % i for i in idxlist]), len(uncomppage)))
+                return tmpbuf, len(idxlist) # buffer, how many characters were reinserted
 
             except zlib.error, exc:
                 #print str(exc)
                 pass
-    return None
+    return None, 0
 
 
 def main():
     if len(sys.argv) != 2:
         print("Usage: %s <vmcore>" % os.path.basename(sys.argv[0]))
         return 1
+
+    replacementpos = dict() # tuples of (where in the original file we replace something, what to put there, difference between original and corrected buffer)
 
     vmcore = sys.argv[1]
     if not os.path.exists(vmcore):
@@ -136,8 +138,6 @@ def main():
         compcount = 0
         uncompcount = 0
 
-        patched_sections = [] # we need to manually inspect these sites
-        
         pagedescfmt = "lIIL" # offset, size, flags, page_flags
         pagedescfmtsize = struct.calcsize(pagedescfmt)
 
@@ -146,6 +146,7 @@ def main():
         # in case of doubt, use a hex editor and check manually
 
         readoffset = dataoffset
+        index_needed_fixing = False
         while readoffset < (len(buf)-dataoffset):
             pdbuf = buf[readoffset:readoffset+pagedescfmtsize]
             cnt = pdbuf.count('\x0a')
@@ -168,21 +169,22 @@ def main():
                 
                 # if offset looks strange then replace the 0a here
                 if (pdbuf[0:struct.calcsize("l")].count('\x0a') and pd_offset <= readoffset + (pagedescfmtsize * 2)) or (pd_offset > len(buf)):
-                    #print("strange offset %d" % pd_offset)
                     pdbuf = pdbuf[0:struct.calcsize("l")-1].replace('\x0a', '\x0d\x0a') + pdbuf[struct.calcsize("l")-1:-1]
                     pd_offset, pd_size, pd_flags, pd_page_flags = struct.unpack(pagedescfmt, pdbuf)
+                    print("fixed index %x (%s) %d %x %x (had strange offset)" % (pd_offset, getHR(pd_offset), pd_size, pd_flags, pd_page_flags))
                     found += 1
                     
                 # page_flags are always set to 0 in the RHEL6 code... hmm
                 # and pd_flags bit indicates page is compressed by ZLIB, RHEL6 does not support anything else
                 if (pdbuf[struct.calcsize("l"):].count('\x0a') and (pd_page_flags != 0) or (pd_flags & ~1)):
-                    #print("strange flags %d" % pd_offset)
                     pdbuf = pdbuf[0:struct.calcsize("l")] + pdbuf[struct.calcsize("l"):].replace('\x0a', '\x0d\x0a')
                     pdbuf = pdbuf[:-1]
                     pd_offset, pd_size, pd_flags, pd_page_flags = struct.unpack(pagedescfmt, pdbuf)
+                    print("fixed index %x (%s) %d %x %x (had strange flag)" % (pd_offset, getHR(pd_offset), pd_size, pd_flags, pd_page_flags))
                     found += 1
                 
                 if found > 0:
+                    index_needed_fixing = True
                     buf = buf[0:readoffset] + pdbuf + buf[readoffset+pagedescfmtsize-found:]
            
             pd_offset, pd_size, pd_flags, pd_page_flags = struct.unpack(pagedescfmt, pdbuf)
@@ -205,11 +207,12 @@ def main():
             readoffset += struct.calcsize(pagedescfmt)
             totalcount += 1
 
-            print("scanfixing %x (%s) %d %x %x" % (pd_offset, getHR(pd_offset), pd_size, pd_flags, pd_page_flags))
-
-        print("scanned index, writing fixed version as backup")
-        with open(vmcore + '_fixedindex', 'wb+') as fw:
-            fw.write(buf)
+        if index_needed_fixing:
+            print("scanned index, writing fixed version as backup")
+            with open(vmcore + '_fixedindex', 'wb+') as fw:
+                fw.write(buf)
+        else:
+            print("scanned index, all ok")
         
         # some entries appear more than once
         addresses = sorted(offsetlist.keys())
@@ -220,11 +223,15 @@ def main():
         previousuncompaddr = 0 # only set if previous section was uncompressed
         previousuncompocc = 0 # only set if previous section was uncompressed
 
-        for addridx, addr in enumerate(addresses):
+        parseoffset = 0 # accumulate negative offsets for getting the correct file offset
+                        # (we patch everything in the end)
+
+        for addridx, addr in enumerate(addresses[0:]):
             pd_size = offsetlist[addr][0]
             pd_flags = offsetlist[addr][1]
             sys.stdout.write("%d/%d 0x%x %d..%d %d 0x%x" % (addridx, len(addresses), addr, addr, addr+pd_size-1, pd_size, pd_flags))
-            pagebuf = buf[addr:addr+pd_size]
+
+            pagebuf = buf[addr-parseoffset:addr-parseoffset+pd_size]
 
             # how many of 'em are we dealing with?
             occurencelist = []
@@ -248,11 +255,13 @@ def main():
 
                     # check if we should skip to trying to backtrack
                     if previousuncompaddr == 0 or previousuncompocc == 0:
-                        result = trypermuteddecompress(pagebuf, occurencelist)
+                        result, reinserted = trypermuteddecompress(pagebuf, occurencelist)
                         if result is not None:
                             # fix up the source buffer, we always make a copy
                             # this is slow so for huge files we'd need to use subbuffers
-                            buf = buf[0:addr] + result + buf[addr+pd_size:]
+                            #buf = buf[0:addr] + result + buf[addr+pd_size:]
+                            replacementpos[addr-parseoffset] = (result, reinserted, 1)
+                            parseoffset += reinserted
                             worked = True
                     else:
                         print("uncompressed previous section at %d, trying to patch up" % previousuncompaddr)
@@ -262,7 +271,7 @@ def main():
                         # short cut: try to find the zlib header
                         for backtrack in range(0,previousuncompocc+1):
                             # backtrack...
-                            if buf[addr-backtrack:addr-backtrack+2] == 'x\x01':
+                            if buf[addr-parseoffset-backtrack:addr-parseoffset-backtrack+2] == 'x\x01':
                                 startbacktrack = backtrack
                                 print("found zlib header at backtrack %d" % startbacktrack)
                                 break
@@ -270,7 +279,7 @@ def main():
                         # a backtrack of 0 is allowed to cover the case where we follow an uncompressed section
                         # but it did not have any \x0d missing
                         for backtrack in range(startbacktrack,previousuncompocc+1):
-                            pagebuf = buf[addr-backtrack:addr-backtrack+pd_size]
+                            pagebuf = buf[addr-parseoffset-backtrack:addr-parseoffset-backtrack+pd_size]
      
                             # try to decompress
                             try:
@@ -286,10 +295,12 @@ def main():
                                     if pagebuf[idx] == '\x0a':
                                         occurencelist.append(idx)
     
-                                result = trypermuteddecompress(pagebuf, occurencelist)
+                                result, reinserted = trypermuteddecompress(pagebuf, occurencelist)
                                 if result is not None:
                                     # fix up the missing characters
-                                    buf = buf[:addr-backtrack] + result + buf[addr-backtrack+pd_size:]
+                                    #buf = buf[:addr-backtrack] + result + buf[addr-backtrack+pd_size:]
+                                    replacementpos[addr-parseoffset-backtrack] = (result, reinserted, 2)
+                                    parseoffset += reinserted
                                     worked = True
                                     break
     
@@ -299,16 +310,16 @@ def main():
                         # sections which will accumulate missing the \x0d characters)
                         if worked and backtrack > 0:
                             print("worked after backtracking %d bytes" % backtrack)
-                            buf = buf[0:previousuncompaddr] + (backtrack * 'X') + buf[previousuncompaddr:]
+                            #buf = buf[0:previousuncompaddr] + (backtrack * 'X') + buf[previousuncompaddr:]
+                            replacementpos[previousuncompaddr] = (backtrack * 'X', backtrack, 3)
+                            parseoffset += backtrack
 
                     if worked:
                         previousuncompaddr = 0 # reset
                         previousuncompocc  = 0
                         continue
             
-                    print("no luck... save what we have and quit")
-                    with open(vmcore + '_partialfixed', 'wb+') as fw:
-                        fw.write(buf)
+                    print("no luck")
                     return
 
                 previousuncompaddr = 0 # reset
@@ -316,22 +327,31 @@ def main():
             else:
                 # nothing we can do here except for trying to patch it up when
                 # things fail at the next compressed section
-                previousuncompaddr = addr
+                previousuncompaddr = addr-parseoffset
                 previousuncompocc += len(occurencelist) # accumulate in case there is more than one uncompressed section
                 sys.stdout.write('\n')
 
-        print("finished! yeah... writing fixed buffer")
-
-        with open(vmcore + '_fixed', 'wb+') as fw:
-            fw.write(buf)
-
-        if len(patched_sections):
-            print("Warning: you need to manually inspect these bytes (they were for now simply padded with 'X' characters)")
-            for addr,l in patched_sections:
-                print("%d..%d length %d" % (addr, addr+l-1, l))
+        if len(replacementpos):
+            print("found %d sites for fixing" % len(replacementpos))
+            filepos = 0
+            print("writing fixed buffer")
+            with open(vmcore + '_fixed', 'wb+') as fw:
+                for where in sorted(replacementpos.keys()):
+                    fixupdata, difference, loc = replacementpos[where]
+                    towrite = where-filepos
+                    if towrite > 0:
+                        fw.write(buf[filepos:where]) # write inbetween data that was correct
+                    fw.write(fixupdata)  # write what was corrected
+                    filepos = where + len(fixupdata) - difference # skip original part that was replaced by fixupdata
+                if filepos != len(buf):
+                    fw.write(buf[filepos:]) # write final bytes
+        else:
+            print("nothing to patch, everything seems ok")
         
-            
-            
+        print("finished, but remember that only compressed pages have been reconstructed while")
+        print("pages that were uncompressed have only been resized by using 'X' characters")
+        print("but their contents will at several places be shifted and may even end up in another page")
+        print(" when several uncompressed pages were next to each other")
 
 
 
