@@ -86,13 +86,6 @@ def main():
         print("Error: vmcore '%s' not found" % vmcore)
         return 1
     
-    # the main page descriptor table has been reconstructed manually by
-    # looking at the correct offsets, so we now only need to check each
-    # compressed piece of memory starting from the lowest address and
-    # trying to uncompress it. If it fails then iteratively check all \x0a
-    # bytes and try their \x0d\x0a equivalent. This builds upon there not being
-    # too many of these sequences
-    
     # for now, this script only works natively for x86_64
     
     with open(vmcore, 'rb') as fh:
@@ -248,7 +241,13 @@ def main():
         parseoffset = 0 # accumulate negative offsets for getting the correct file offset
                         # (we patch everything in the end)
 
-        for addridx, addr in enumerate(addresses[0:]):
+        # the main page descriptor table has been reconstructed so we now
+        # check each compressed piece of memory starting from the lowest address and
+        # try to uncompress it. If it fails then iteratively check all \x0a
+        # bytes and try their \x0d\x0a equivalent. This builds upon there not being
+        # too many of these sequences
+
+        for addridx, addr in enumerate(addresses):
             pd_size = offsetlist[addr][0]
             pd_flags = offsetlist[addr][1]
             sys.stdout.write("%d/%d 0x%x %d..%d %d 0x%x" % (addridx, len(addresses), addr, addr, addr+pd_size-1, pd_size, pd_flags))
