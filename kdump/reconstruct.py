@@ -354,18 +354,6 @@ def main():
         print(" when several uncompressed pages were next to each other")
 
 
-
-def kbits(n, k):
-    result = []
-    for bits in itertools.combinations(range(n), k):
-        num = 0
-        for bit in bits:
-            num |= (1<<bit)
-        result.append(num)
-    return result
-
-#Output: ['1110', '1101', '1011', '0111']
-
 if __name__ == '__main__':
     try:
         main()
