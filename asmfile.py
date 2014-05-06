@@ -52,6 +52,7 @@ class ASMFile:
             # matcher, what parsing function to run
             ( re.compile('.+R_X86_64_32S\s+(\..+)\s+'), self._rorelocparse ), # only accept symbols starting with '.' which should be ELF sections
             ( re.compile('\s*([0-9a-fA-F]+):\s+((?:[0-9a-fA-F ]{2})+).+BYTE PTR \[rip\+(0x[0-9a-fA-F]+)\].+'), self._loadipparse ), # will contain mov, so needs to come first
+            ( re.compile('\s*([0-9a-fA-F]+):\s+((?:[0-9a-fA-F ]{2})+).+lea\s+.+\[rip\+(0x[0-9a-fA-F]+)\].+'), self._loadipparse ), # will contain mov, so needs to come first
             ( re.compile('.+\smov\s+.+,(0x[0-9a-fA-F]+)\s+'), self._loadaddrparse ),
         )
 
