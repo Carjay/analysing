@@ -278,9 +278,6 @@ def main():
                     if previousuncompaddr == 0 or previousuncompocc == 0:
                         result, reinserted = trypermuteddecompress(pagebuf, occurencelist)
                         if result is not None:
-                            # fix up the source buffer, we always make a copy
-                            # this is slow so for huge files we'd need to use subbuffers
-                            #buf = buf[0:addr] + result + buf[addr+pd_size:]
                             replacementpos[addr-parseoffset] = (result, reinserted, 1)
                             parseoffset += reinserted
                             worked = True
@@ -319,7 +316,6 @@ def main():
                                 result, reinserted = trypermuteddecompress(pagebuf, occurencelist)
                                 if result is not None:
                                     # fix up the missing characters
-                                    #buf = buf[:addr-backtrack] + result + buf[addr-backtrack+pd_size:]
                                     replacementpos[addr-parseoffset-backtrack] = (result, reinserted, 2)
                                     parseoffset += reinserted
                                     worked = True
@@ -331,7 +327,6 @@ def main():
                         # sections which will accumulate missing the \x0d characters)
                         if worked and backtrack > 0:
                             print("worked after backtracking %d bytes" % backtrack)
-                            #buf = buf[0:previousuncompaddr] + (backtrack * 'X') + buf[previousuncompaddr:]
                             replacementpos[previousuncompaddr] = (backtrack * 'X', backtrack, 3)
                             parseoffset += backtrack
 
